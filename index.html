@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>父亲节快乐</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@300;400;500&family=Ma+Shan+Zheng&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6EFE2;
+    --paper-deep:#EFE4CF;
+    --peach:#D97A52;
+    --peach-soft:#E9A98A;
+    --branch:#5C4632;
+    --leaf:#6F7F4E;
+    --ink:#3A2E22;
+    --gold:#C99A4A;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    min-height:100vh;
+    background:var(--paper);
+    font-family:"Noto Sans SC", sans-serif;
+    color:var(--ink);
+    overflow-x:hidden;
+  }
+
+  /* ---------- COVER (照片开屏) ---------- */
+  .cover{
+    position:relative;
+    width:100%;
+    height:100svh;
+    min-height:560px;
+    background-color:#3A2E22;
+    background-size:cover;
+    background-position:center;
+    display:flex;
+    flex-direction:column;
+    justify-content:flex-end;
+    cursor:pointer;
+    transition:transform .7s cubic-bezier(.22,1,.36,1), opacity .7s ease;
+  }
+  .cover::before{
+    content:"";
+    position:absolute; inset:0;
+    background:linear-gradient(180deg, rgba(20,15,8,0.05) 0%, rgba(20,15,8,0.10) 40%, rgba(20,15,8,0.72) 100%);
+  }
+  .cover.opened{
+    transform:translateY(-100%);
+    opacity:0;
+    pointer-events:none;
+  }
+  .cover-content{
+    position:relative;
+    z-index:2;
+    padding:0 26px 48px;
+    text-align:center;
+    color:#fff;
+  }
+  .cover-eyebrow{
+    font-size:11px;
+    letter-spacing:.4em;
+    color:var(--peach-soft);
+    margin-bottom:14px;
+  }
+  .cover h1{
+    font-family:"Noto Serif SC", serif;
+    font-weight:700;
+    font-size:32px;
+    line-height:1.45;
+    margin:0 0 18px;
+    text-shadow:0 2px 18px rgba(0,0,0,.35);
+  }
+  .tap-hint{
+    font-size:12px;
+    letter-spacing:.12em;
+    color:rgba(255,255,255,.85);
+    animation:pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:.55}50%{opacity:1}}
+
+  .cover-photo-tag{
+    position:absolute;
+    top:18px; left:0; right:0;
+    z-index:2;
+    text-align:center;
+    font-size:11px;
+    letter-spacing:.1em;
+    color:rgba(255,255,255,.55);
+  }
+
+  /* ---------- LETTER ---------- */
+  .stage{
+    width:100%;
+    max-width:440px;
+    margin:0 auto;
+    padding:28px 20px 70px;
+  }
+  .letter{
+    opacity:0;
+    transform:translateY(18px);
+    pointer-events:none;
+    transition:opacity .8s ease .1s, transform .8s cubic-bezier(.22,1,.36,1) .1s;
+  }
+  .letter.show{
+    opacity:1;
+    transform:translateY(0);
+    pointer-events:auto;
+  }
+
+  .sheet{
+    background:var(--paper);
+    border:1px solid rgba(92,70,50,0.18);
+    border-radius:3px;
+    padding:38px 24px 30px;
+    box-shadow:0 24px 50px -28px rgba(58,46,34,0.45);
+    position:relative;
+  }
+  .sheet::before{
+    content:"";
+    position:absolute;
+    top:0; left:0; right:0; height:5px;
+    background:linear-gradient(90deg, var(--peach), var(--gold) 50%, var(--leaf));
+    border-radius:3px 3px 0 0;
+  }
+  .stamp{
+    position:absolute;
+    top:18px; right:18px;
+    width:44px; height:44px;
+    border:1.5px solid var(--gold);
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-family:"Noto Serif SC", serif;
+    font-size:11px;
+    color:var(--gold);
+    letter-spacing:1px;
+    transform:rotate(8deg);
+  }
+  .salute{
+    font-family:"Noto Serif SC", serif;
+    font-size:19px;
+    font-weight:600;
+    margin:6px 0 22px;
+  }
+  .body-text p{ margin:0 0 18px; font-size:15.5px; line-height:2.05; color:#463A2B; }
+  .body-text p:last-child{ margin-bottom:0; }
+
+  .sign-block{ margin-top:30px; text-align:right; }
+  .sign-block .sign-label{ font-size:13px; color:#8a7860; margin-bottom:2px; }
+  .sign-block .sign-name{ font-family:"Ma Shan Zheng", cursive; font-size:30px; color:var(--peach); }
+  .sign-block .sign-date{ font-size:12px; color:#9a8266; margin-top:6px; letter-spacing:.04em; }
+
+  /* ---------- GALLERY ---------- */
+  .gallery-section{ margin-top:36px; }
+  .gallery-title{
+    text-align:center;
+    font-family:"Noto Serif SC", serif;
+    font-size:15px;
+    font-weight:600;
+    color:var(--branch);
+    margin-bottom:4px;
+  }
+  .gallery-sub{
+    text-align:center;
+    font-size:12px;
+    color:#9a8266;
+    margin-bottom:20px;
+    letter-spacing:.04em;
+  }
+  .gallery-grid{
+    display:grid;
+    grid-template-columns:repeat(2, 1fr);
+    gap:14px;
+  }
+  .gallery-grid .polaroid:nth-child(3n+1){ transform:rotate(-2.5deg); }
+  .gallery-grid .polaroid:nth-child(3n+2){ transform:rotate(2deg); }
+  .gallery-grid .polaroid:nth-child(3n){ transform:rotate(-1deg); }
+
+  .polaroid{
+    background:#fff;
+    padding:8px 8px 16px;
+    box-shadow:0 10px 22px -12px rgba(58,46,34,0.4);
+    border-radius:2px;
+  }
+  .polaroid .ph{
+    width:100%;
+    aspect-ratio:1/1;
+    object-fit:cover;
+    background:var(--paper-deep);
+    display:block;
+  }
+  .polaroid .cap{
+    display:block;
+    text-align:center;
+    font-size:10px;
+    color:#a89678;
+    margin-top:8px;
+    letter-spacing:.06em;
+  }
+
+  .petal-layer{ position:fixed; inset:0; pointer-events:none; z-index:5; }
+  .petal{
+    position:absolute; top:-20px; width:10px; height:10px;
+    background:var(--peach-soft); border-radius:60% 0 60% 0; opacity:.85;
+    animation:fall linear forwards;
+  }
+  @keyframes fall{ to{ transform:translateY(110vh) translateX(var(--drift)) rotate(var(--spin)); opacity:0; } }
+
+  @media (prefers-reduced-motion: reduce){
+    .cover, .letter, .petal{ transition:none !important; animation:none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="cover" id="cover" role="button" tabindex="0" aria-label="点击打开贺卡">
+  <div class="cover-photo-tag" id="coverTag"></div>
+  <div class="cover-content">
+    <div class="cover-eyebrow">FATHER&nbsp;&nbsp;'&nbsp;&nbsp;S&nbsp;&nbsp;&nbsp;DAY</div>
+    <h1>父亲节快乐</h1>
+    <div class="tap-hint">轻触打开 ▾</div>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="letter" id="letter">
+    <div class="sheet">
+      <div class="stamp">父<br>亲<br>节</div>
+      <div class="salute">爸爸：</div>
+      <div class="body-text">
+        <p>不知道你有没有发现，我很少正经地说"谢谢"或者"我爱你"这种话——大概是当面说总觉得有点别扭，写下来反倒敢说真心话了。</p>
+        <p>这几年我总在忙各种"奇奇怪怪"的事：写脚本、做账号、对着电脑一坐一下午，常常一头扎进去就忘了时间，也忘了说一声。但每次抬头，你好像总是在那儿，没多问"这又是在折腾什么"，就先把该兜住的事情兜住了。</p>
+        <p>别人家可能管得严、推得紧，我倒从没觉得自己缺过什么——因为你给我的，是那种"你去试，我在后面"的踏实感。这种踏实感，比任何一句具体的叮嘱都重要，也是我敢一直折腾下去的底气。</p>
+        <p>今天没准备什么特别的礼物，就想认真说一句：谢谢你，爸爸。节日快乐。</p>
+      </div>
+      <div class="sign-block">
+        <div class="sign-label">爱你的</div>
+        <div class="sign-name">女儿</div>
+        <div class="sign-date" id="today"></div>
+      </div>
+    </div>
+
+    <div class="gallery-section">
+      <div class="gallery-title">这些年的爸爸</div>
+      <div class="gallery-sub">tap a photo · 点开看大图</div>
+      <div class="gallery-grid" id="galleryGrid"></div>
+    </div>
+  </div>
+</div>
+
+<div class="petal-layer" id="petals"></div>
+
+<script>
+  /* =========================================================
+     在这里替换成你自己的照片链接（图片上传到 GitHub 仓库后，
+     用 raw 链接，格式类似：
+     https://raw.githubusercontent.com/用户名/仓库名/main/文件名.jpg ）
+
+     还没准备好照片时，下面会自动用占位图代替，不会报错。
+     ========================================================= */
+
+  function placeholderDataURI(label, bg, fg, w, h){
+    const fs = Math.round(w/11);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'
+      + '<rect width="100%" height="100%" fill="'+bg+'"/>'
+      + '<text x="50%" y="50%" font-family="sans-serif" font-size="'+fs+'" fill="'+fg+'" text-anchor="middle" dominant-baseline="middle">'+label+'</text>'
+      + '</svg>';
+    return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+  }
+
+  // 封面照片：开屏立刻显示的那张。留空字符串 "" 就会显示占位图
+  const COVER_PHOTO_URL = "";
+
+  // 照片墙：信下面展示的爸爸其他照片，按需增删。url 留空 "" 会显示占位图
+  const GALLERY_PHOTOS = [
+    { url: "", caption: "", fallback: placeholderDataURI("照片 1", "#E9A98A", "#3A2E22", 400, 400) },
+    { url: "", caption: "", fallback: placeholderDataURI("照片 2", "#C99A4A", "#3A2E22", 400, 400) },
+    { url: "", caption: "", fallback: placeholderDataURI("照片 3", "#6F7F4E", "#F6EFE2", 400, 400) },
+    { url: "", caption: "", fallback: placeholderDataURI("照片 4", "#D97A52", "#F6EFE2", 400, 400) },
+  ];
+  /* ========================================================= */
+
+  function setCoverPhoto(url, fallback){
+    const coverEl = document.getElementById('cover');
+    if(!url){ coverEl.style.backgroundImage = `url("${fallback}")`; return; }
+    const test = new Image();
+    test.onload = function(){ coverEl.style.backgroundImage = `url("${url}")`; };
+    test.onerror = function(){ coverEl.style.backgroundImage = `url("${fallback}")`; };
+    test.src = url;
+  }
+  const COVER_FALLBACK = placeholderDataURI("封面照片 · 点击替换", "#3A2E22", "#F6EFE2", 900, 1600);
+  setCoverPhoto(COVER_PHOTO_URL, COVER_FALLBACK);
+
+  const grid = document.getElementById('galleryGrid');
+  GALLERY_PHOTOS.forEach(p=>{
+    const card = document.createElement('div');
+    card.className = 'polaroid';
+    const src = p.url || p.fallback;
+    const img = document.createElement('img');
+    img.className = 'ph';
+    img.alt = '爸爸的照片';
+    img.loading = 'lazy';
+    img.src = src;
+    img.onerror = function(){ this.onerror = null; this.src = p.fallback; };
+    card.appendChild(img);
+    if(p.caption){
+      const cap = document.createElement('span');
+      cap.className = 'cap';
+      cap.textContent = p.caption;
+      card.appendChild(cap);
+    }
+    grid.appendChild(card);
+  });
+
+  const today = new Date();
+  document.getElementById('today').textContent =
+    `${today.getFullYear()}年${today.getMonth()+1}月${today.getDate()}日`;
+
+  const cover = document.getElementById('cover');
+  const letter = document.getElementById('letter');
+  function openCard(){
+    if(cover.classList.contains('opened')) return;
+    cover.classList.add('opened');
+    letter.classList.add('show');
+    spawnPetals(16);
+    document.body.style.overflow = 'auto';
+  }
+  cover.addEventListener('click', openCard);
+  cover.addEventListener('keypress', (e)=>{ if(e.key==='Enter') openCard(); });
+
+  function spawnPetals(n){
+    const layer = document.getElementById('petals');
+    for(let i=0;i<n;i++){
+      const p = document.createElement('div');
+      p.className = 'petal';
+      p.style.left = Math.random()*100 + 'vw';
+      p.style.setProperty('--drift', (Math.random()*80-40) + 'px');
+      p.style.setProperty('--spin', (Math.random()*360) + 'deg');
+      p.style.animationDuration = (4 + Math.random()*3) + 's';
+      p.style.animationDelay = (Math.random()*1.2) + 's';
+      layer.appendChild(p);
+      setTimeout(()=>p.remove(), 9000);
+    }
+  }
+</script>
+</body>
+</html>
