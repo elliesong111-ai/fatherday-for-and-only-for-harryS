@@ -1,0 +1,22 @@
+{
+  "name": "Sketch to Chart",
+  "short_name": "SketchChart",
+  "description": "Snap a photo of a handwritten chart sketch and turn it into a clean chart.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f9f9f7",
+  "theme_color": "#2a78d6",
+  "icons": [
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [{ "name": "image", "accept": ["image/*"] }]
+    }
+  }
+}
