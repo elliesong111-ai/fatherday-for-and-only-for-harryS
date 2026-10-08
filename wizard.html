@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>像素巫师 · 施法</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #07071a; }
+  canvas {
+    display: block; width: 100vw; height: 100vh;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+  }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+'use strict';
+(function () {
+
+// ---------------------------------------------------------------------------
+// 逻辑分辨率与调色板（25 色）。帧缓冲里只存调色板索引，最终统一查表转 RGBA，
+// 所以画面上的每一个像素都必然来自这个调色板。
+// ---------------------------------------------------------------------------
+const W = 128, H = 96;
+
+const PAL_HEX = [
+  '#07071a', // 0  VOID     描边 / 最暗
+  '#0d0f2b', // 1  SKY0     夜空（顶）
+  '#161a44', // 2  SKY1     深蓝
+  '#23194f', // 3  SKY2     深紫
+  '#352063', // 4  SKY3     地平线紫
+  '#fffbe8', // 5  WHITE
+  '#e9e2bf', // 6  MOON
+  '#b3a98a', // 7  MOON_SH
+  '#1c1a28', // 8  STONE_D
+  '#3b3a52', // 9  STONE
+  '#5f5f7c', // 10 STONE_L
+  '#5a1830', // 11 ROBE_D
+  '#a8283c', // 12 ROBE
+  '#e0662c', // 13 TRIM     长袍第二色
+  '#f6c24a', // 14 GOLD
+  '#f0b58c', // 15 SKIN
+  '#b06a50', // 16 SKIN_SH
+  '#dfe3f0', // 17 BEARD
+  '#8f93b3', // 18 BEARD_SH
+  '#5b3420', // 19 WOOD_D
+  '#94603a', // 20 WOOD
+  '#5cf2ff', // 21 CYAN     魔法色
+  '#3f7bff', // 22 BLUE     魔法色
+  '#d65cff', // 23 MAGENTA  魔法色
+  '#3a2a8c'  // 24 MAGIC_D  魔法暗色
+];
+const VOID = 0, SKY0 = 1, SKY1 = 2, SKY2 = 3, SKY3 = 4, WHITE = 5, MOON = 6, MOON_SH = 7,
+      STONE_D = 8, STONE = 9, STONE_L = 10, ROBE_D = 11, ROBE = 12, TRIM = 13, GOLD = 14,
+      SKIN = 15, SKIN_SH = 16, BEARD = 17, BEARD_SH = 18, WOOD_D = 19, WOOD = 20,
+      CYAN = 21, BLUE = 22, MAGENTA = 23, MAGIC_D = 24;
+
+const PAL32 = new Uint32Array(256);
+for (let i = 0; i < PAL_HEX.length; i++) {
+  const n = parseInt(PAL_HEX[i].slice(1), 16);
+  PAL32[i] = ((255 << 24) | ((n & 255) << 16) | (((n >> 8) & 255) << 8) | (n >> 16)) >>> 0;
+}
+
+// 强光爆发时的“提亮一级”映射：仍然是调色板内的颜色互相替换
+const BRIGHT = new Uint8Array(256);
+for (let i = 0; i < 256; i++) BRIGHT[i] = i;
+const BRIGHT_PAIRS = [
+  VOID, SKY0, SKY0, SKY1, SKY1, SKY2, SKY2, SKY3, SKY3, MAGIC_D, MOON, WHITE, MOON_SH, MOON,
+  STONE_D, STONE, STONE, STONE_L, STONE_L, BEARD_SH, ROBE_D, ROBE, ROBE, TRIM, TRIM, GOLD,
+  GOLD, WHITE, SKIN_SH, SKIN, BEARD, WHITE, BEARD_SH, BEARD, WOOD_D, WOOD, CYAN, WHITE,
+  BLUE, CYAN, MAGIC_D, BLUE
+];
+for (let i = 0; i < BRIGHT_PAIRS.length; i += 2) BRIGHT[BRIGHT_PAIRS[i]] = BRIGHT_PAIRS[i + 1];
+const REMAP0 = new Uint8Array(256), REMAP2 = new Uint8Array(256);
+for (let i = 0; i < 256; i++) { REMAP0[i] = i; REMAP2[i] = BRIGHT[BRIGHT[i]]; }
+
+const TAU = Math.PI * 2;
+
+// 粒子颜色渐变：白 → 魔法色 → 暗色
+const RAMP = new Uint8Array([WHITE, WHITE, CYAN, CYAN, BLUE, MAGENTA, MAGIC_D, MAGIC_D]);
+const RAMP_N = RAMP.length;
+
+// 确定性随机数（xorshift32），不分配对象
+let seed = 0x2f6b9a1d | 0;
+function rnd() {
+  seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+  return (seed >>> 0) / 4294967296;
+}
+function hash(x, y) {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+function easeInOutCubic(k) { return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; }
+function easeInOutQuad(k) { return k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; }
+function easeOutBack(k) { const c1 = 1.70158, c3 = c1 + 1, m = k - 1; return 1 + c3 * m * m * m + c1 * m * m; }
+
+// ---------------------------------------------------------------------------
+// 画布
+// ---------------------------------------------------------------------------
+const screen = document.getElementById('screen');
+const sctx = screen.getContext('2d', { alpha: false });
+const off = document.createElement('canvas');
+off.width = W; off.height = H;
+const octx = off.getContext('2d');
+const img = octx.createImageData(W, H);
+const out32 = new Uint32Array(img.data.buffer);
+const fb = new Uint8Array(W * H);
+
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.max(1, Math.round(window.innerWidth * dpr));
+  const ch = Math.max(1, Math.round(window.innerHeight * dpr));
+  screen.width = cw; screen.height = ch;
+  scale = Math.max(1, Math.floor(Math.min(cw / W, ch / H)));
+  offX = Math.floor((cw - W * scale) / 2);
+  offY = Math.floor((ch - H * scale) / 2);
+  sctx.imageSmoothingEnabled = false;
+  sctx.fillStyle = PAL_HEX[VOID];
+  sctx.fillRect(0, 0, cw, ch);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// 屏幕震动（整数逻辑像素）
+let camX = 0, camY = 0;
+function pset(x, y, c) {
+  x += camX; y += camY;
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  fb[y * W + x] = c;
+}
+function psetR(x, y, c) { pset(Math.round(x), Math.round(y), c); }
+
+// ---------------------------------------------------------------------------
+// 场景布局
+// ---------------------------------------------------------------------------
+const GROUND_Y = 80;
+const WX0 = 22, WY0 = GROUND_Y - 32;          // 巫师 24×32 包围盒左上角（世界坐标）
+const MOON_X = 104, MOON_Y = 17, MOON_R = 8;
+
+// 静态背景预渲染（比屏幕四周各多 4 像素，供震动时使用）
+const BGO = 4, BGW = W + BGO * 2, BGH = H + BGO * 2;
+const BG = new Uint8Array(BGW * BGH);
+const BAYER = new Uint8Array([0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]);
+const SKY_EDGES = [20, 40, 58], SKY_COLS = [SKY0, SKY1, SKY2, SKY3], SKY_DITH = 8;
+
+function skyAt(x, y) {
+  const yy = y < 0 ? 0 : y;
+  let b = 0;
+  while (b < 3 && yy >= SKY_EDGES[b]) b++;
+  let c = SKY_COLS[b];
+  if (b < 3) {
+    const s = SKY_EDGES[b] - SKY_DITH;
+    if (yy >= s) {
+      const t = (yy - s + 0.5) / SKY_DITH;
+      if (BAYER[((yy & 3) << 2) | (x & 3)] < t * 16) c = SKY_COLS[b + 1];
+    }
+  }
+  return c;
+}
+function groundAt(x, y) {
+  if (y === GROUND_Y) return (hash(x, 7) % 11 === 0) ? STONE : STONE_L;
+  const yy = y - GROUND_Y - 1, r = (yy / 5) | 0, ry = yy - r * 5;
+  const rx = (((x + ((r & 1) ? 7 : 0)) % 14) + 14) % 14;
+  if (ry === 4 || rx === 13) return STONE_D;
+  let c = (ry === 0 || rx === 0) ? STONE_L : STONE;
+  if (c === STONE && hash(x, y) % 9 === 0) c = STONE_D;
+  if (r >= 2) {                       // 越往下越暗
+    if (c === STONE_L) c = STONE;
+    else if (c === STONE && ((x + y) & 1)) c = STONE_D;
+  }
+  return c;
+}
+const MOON_CRATERS = [-3, 1, -2, 2, -4, 2, 2, 3, 3, 3, 1, -4, -1, -2, 4, -1];
+(function buildBackground() {
+  for (let by = 0; by < BGH; by++) {
+    const y = by - BGO;
+    for (let bx = 0; bx < BGW; bx++) {
+      const x = bx - BGO;
+      let c;
+      if (y >= GROUND_Y) {
+        c = groundAt(x, y);
+      } else {
+        c = skyAt(x, y);
+        // 远山与近山的剪影
+        const far = 62 + Math.round(3 * Math.sin(x * 0.05 + 0.5) + 2 * Math.sin(x * 0.13 + 2));
+        const near = 71 + Math.round(2.5 * Math.sin(x * 0.08 + 1) + 1.5 * Math.sin(x * 0.21));
+        if (y >= far) c = SKY1;
+        if (y >= near) c = SKY0;
+        // 远处小塔与一扇亮着的窗
+        if (x >= 96 && x <= 100 && y >= 56 && y < far + 2) c = SKY0;
+        if ((y === 55 && x >= 96 && x <= 100) || (y === 54 && x >= 97 && x <= 99) || (y === 53 && x === 98)) c = SKY0;
+        if (x === 98 && y === 58) c = GOLD;
+        // 月亮与光晕
+        const dx = x - MOON_X, dy = y - MOON_Y, d = Math.sqrt(dx * dx + dy * dy);
+        if (d <= MOON_R + 0.5) {
+          const sx = dx - 2.5, sy = dy + 2.5;
+          c = (sx * sx + sy * sy > MOON_R * MOON_R) ? MOON_SH : MOON;
+        } else if (d <= MOON_R + 2.5) {
+          c = BRIGHT[c];
+        } else if (d <= MOON_R + 4.5 && ((x + y) & 1) === 0) {
+          c = BRIGHT[c];
+        }
+      }
+      BG[by * BGW + bx] = c;
+    }
+  }
+  for (let i = 0; i < MOON_CRATERS.length; i += 2) {
+    BG[(MOON_Y + MOON_CRATERS[i + 1] + BGO) * BGW + MOON_X + MOON_CRATERS[i] + BGO] = MOON_SH;
+  }
+  // 巫师脚下的影子（月光在右上方，影子偏左）
+  for (let x = WX0; x <= WX0 + 18; x++) BG[(GROUND_Y + BGO) * BGW + x + BGO] = STONE_D;
+  for (let x = WX0 + 2; x <= WX0 + 15; x++) BG[(GROUND_Y + 1 + BGO) * BGW + x + BGO] = STONE_D;
+})();
+
+// 星星：1 像素，闪烁周期与 64 帧动画循环对齐，保证无缝
+const NSTARS = 26;
+const starX = new Int16Array(NSTARS), starY = new Int16Array(NSTARS);
+const starPh = new Float32Array(NSTARS), starSp = new Float32Array(NSTARS), starBig = new Uint8Array(NSTARS);
+(function buildStars() {
+  let n = 0, guard = 0;
+  while (n < NSTARS && guard++ < 2000) {
+    const x = 2 + ((rnd() * 124) | 0), y = 2 + ((rnd() * 48) | 0);
+    const dx = x - MOON_X, dy = y - MOON_Y;
+    if (dx * dx + dy * dy < 15 * 15) continue;
+    let ok = true;
+    for (let j = 0; j < n; j++) if (Math.abs(starX[j] - x) + Math.abs(starY[j] - y) < 6) { ok = false; break; }
+    if (!ok) continue;
+    starX[n] = x; starY[n] = y;
+    starPh[n] = rnd() * TAU;
+    starSp[n] = TAU * (1 + ((rnd() * 4) | 0)) / 64;
+    starBig[n] = n < 4 ? 1 : 0;
+    n++;
+  }
+})();
+const STAR_COLS = new Uint8Array([MAGIC_D, BEARD_SH, WHITE]);
+
+// ---------------------------------------------------------------------------
+// 巫师精灵：每帧程序化地画进 64×64 的索引缓冲，再做轮廓光与描边
+// ---------------------------------------------------------------------------
+const SW = 64, SH = 64, SOX = 16, SOY = 24;      // 包围盒 (0,0) 在缓冲中的位置
+const EMPTY = 255, OUTL = 253, TIP = 254;
+const spr = new Uint8Array(SW * SH);
+function sp(x, y, c) {
+  x += SOX; y += SOY;
+  if (x < 0 || y < 0 || x >= SW || y >= SH) return;
+  spr[y * SW + x] = c;
+}
+function sprEmpty(x, y) {
+  if (x < 0 || y < 0 || x >= SW || y >= SH) return true;
+  return spr[y * SW + x] >= 250;
+}
+
+// 帽子与头部：一串串像素
+const HEAD_ROWS = [
+  '....rRR...........',
+  '..ttrRRT..........',
+  '.tt..rRRT.........',
+  '.t...rRRRT........',
+  '.....rrRRRT.......',
+  '.....rrRRRRT......',
+  '....rrRRRRRRT.....',
+  '....rrRRRRRRRT....',
+  '...GGGGGGGGGGGG...',
+  '.rRRRRRRRRRRRRRRR.',
+  '..rrrrrrrrrrrrrr..',
+  '........bsSBBBB...',
+  '........bsSSSKS...',
+  '........bsSSSSSS..',
+  '........bbBBBBBB..'
+];
+const HEAD_W = 18, HEAD_H = HEAD_ROWS.length;
+const HEAD = new Uint8Array(HEAD_W * HEAD_H);
+(function () {
+  const map = { '.': EMPTY, r: ROBE_D, R: ROBE, T: TRIM, G: GOLD, S: SKIN, s: SKIN_SH, B: BEARD, b: BEARD_SH, K: VOID, t: TIP };
+  for (let y = 0; y < HEAD_H; y++) for (let x = 0; x < HEAD_W; x++) HEAD[y * HEAD_W + x] = map[HEAD_ROWS[y][x]];
+})();
+
+// 长袍每行左右边界（y = 15..31）
+const ROBE_L = new Int8Array([6, 5, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2]);
+const ROBE_R = new Int8Array([15, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19, 20, 20, 20]);
+// 胡子每行左右边界（y = 15..24）
+const BEARD_L = new Int8Array([9, 9, 9, 10, 10, 10, 11, 11, 12, 12]);
+const BEARD_R = new Int8Array([15, 16, 15, 15, 15, 14, 14, 13, 13, 12]);
+
+// 不接受轮廓光的颜色（魔法色、眼睛、空）
+const NORIM = new Uint8Array(256);
+NORIM[VOID] = NORIM[WHITE] = NORIM[CYAN] = NORIM[BLUE] = NORIM[MAGENTA] = NORIM[MAGIC_D] = 1;
+NORIM[EMPTY] = NORIM[OUTL] = NORIM[TIP] = 1;
+
+// 姿势参数
+function makePose(hx, hy, ang, tilt) { return { hx: hx, hy: hy, ang: ang, tilt: tilt }; }
+const REST   = makePose(19, 22, 0.10, 0);
+const RAISE  = makePose(19, 9, -0.10, -1);
+const ANTIC  = makePose(17, 8, -0.35, -1);
+const THRUST = makePose(23, 15, 1.20, 1);
+const pose = makePose(19, 22, 0.10, 0);
+function setPose(a) { pose.hx = a.hx; pose.hy = a.hy; pose.ang = a.ang; pose.tilt = a.tilt; }
+function lerpPose(a, b, k) {
+  pose.hx = a.hx + (b.hx - a.hx) * k;
+  pose.hy = a.hy + (b.hy - a.hy) * k;
+  pose.ang = a.ang + (b.ang - a.ang) * k;
+  pose.tilt = a.tilt + (b.tilt - a.tilt) * k;
+}
+// 量化后的姿势（整数像素）
+const ASTEP = Math.PI / 24;
+let qHX = 19, qHY = 22, qTilt = 0, qSin = 0, qCos = 1;
+let bob = 0, beardSway = 0, hem = 0, flop = 0;
+let gemLX = 0, gemLY = 0;          // 宝石在包围盒内的坐标
+let gemX = 0, gemY = 0;            // 宝石世界坐标
+
+function quantizePose() {
+  qHX = Math.round(pose.hx);
+  qHY = Math.round(pose.hy) + bob;
+  qTilt = Math.round(pose.tilt);
+  const a = Math.round(pose.ang / ASTEP) * ASTEP;
+  qSin = Math.sin(a); qCos = Math.cos(a);
+  gemLX = Math.round(qHX + qSin * 15);
+  gemLY = Math.round(qHY - qCos * 15);
+  gemX = WX0 + gemLX; gemY = WY0 + gemLY;
+}
+
+// 粗笔刷线（袖子）：先画 3×3 暗色，再画 2×2 亮色，得到下右侧的阴影边
+function sleeveLine(x0, y0, x1, y1) {
+  for (let pass = 0; pass < 2; pass++) {
+    let x = x0, y = y0;
+    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      if (pass === 0) { for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) sp(x + i, y + j, ROBE_D); }
+      else { for (let j = -1; j <= 0; j++) for (let i = -1; i <= 0; i++) sp(x + i, y + j, ROBE); }
+      if (x === x1 && y === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x += sx; }
+      if (e2 <= dx) { err += dx; y += sy; }
+    }
+  }
+}
+function staffLine(x0, y0, x1, y1) {
+  let x = x0, y = y0, n = 0;
+  const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    if (y <= 31) sp(x, y, (n % 5 === 3) ? WOOD_D : WOOD);
+    n++;
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+}
+
+// 状态机
+const ST_IDLE = 0, ST_CHARGE = 1, ST_CAST = 2, ST_RECOVER = 3;
+const ST_TICKS = [120, 100, 40, 60];    // 均为 5 的倍数：64 张动画帧 / 循环
+const RELEASE_TICK = 5;
+let state = ST_IDLE, stick = 0, tick = 0;
+let releaseTick = -10000;
+
+function buildWizard() {
+  spr.fill(EMPTY);
+  const bd = bob, tl = qTilt;
+
+  // 后臂（在身体后面，暗色）
+  for (let y = 17; y <= 23; y++) {
+    const l = y < 19 ? 3 : y < 22 ? 2 : 1, r = y < 19 ? 5 : 4;
+    for (let x = l; x <= r; x++) sp(x, y + bd, ROBE_D);
+  }
+  for (let x = 1; x <= 3; x++) sp(x, 24 + bd, TRIM);
+  sp(2, 25 + bd, SKIN_SH);
+
+  // 长袍：双色（红 + 橙）加袍摆摆动
+  for (let i = 0; i < 17; i++) {
+    const y = 15 + i;
+    const dy = y <= 23 ? bd : 0;
+    const o = y >= 25 ? Math.round(hem * (y - 24) / 7) : 0;
+    const l = ROBE_L[i] + o, r = ROBE_R[i] + o;
+    for (let x = l; x <= r; x++) {
+      let c = ROBE;
+      if (x <= l + 1) c = ROBE_D;
+      if (y >= 22 && (x === 14 + o || x === 15 + o)) c = TRIM;
+      if (y >= 25 && x === 8 + o) c = ROBE_D;
+      if (y === 21) c = (x === 13 || x === 14) ? GOLD : ROBE_D;
+      if (y === 30) c = ((x + o) & 1) ? GOLD : TRIM;
+      if (y === 31) c = TRIM;
+      sp(x, y + dy, c);
+    }
+  }
+  sp(21 + (hem > 0 ? 1 : 0), 31, WOOD_D);       // 靴尖
+  sp(22 + (hem > 0 ? 1 : 0), 31, WOOD_D);
+
+  // 法杖
+  const hx = qHX, hy = qHY;
+  staffLine(Math.round(hx - qSin * 10), Math.round(hy + qCos * 10),
+            Math.round(hx + qSin * 13), Math.round(hy - qCos * 13));
+  // 杖头托爪
+  const pxv = qCos, pyv = qSin;                 // 垂直于法杖的方向
+  const mx = hx + qSin * 14, my = hy - qCos * 14;
+  sp(Math.round(mx + pxv * 2), Math.round(my + pyv * 2), WOOD_D);
+  sp(Math.round(mx - pxv * 2), Math.round(my - pyv * 2), WOOD_D);
+  sp(Math.round(mx + qSin * 2 + pxv * 2), Math.round(my - qCos * 2 + pyv * 2), WOOD);
+  sp(Math.round(mx + qSin * 2 - pxv * 2), Math.round(my - qCos * 2 - pyv * 2), WOOD);
+
+  // 前臂：肩 → 袖口 → 手
+  const shX = 15, shY = 17 + bd;
+  const ax = hx - shX, ay = hy - shY, al = Math.sqrt(ax * ax + ay * ay) || 1;
+  const cx = Math.round(hx - ax / al * 2), cy = Math.round(hy - ay / al * 2);
+  sleeveLine(shX, shY, cx, cy);
+  for (let j = -1; j <= 0; j++) for (let i = -1; i <= 1; i++) sp(cx + i, cy + j, TRIM);
+  sp(cx, cy + 1, TRIM);
+  sp(hx - 1, hy, SKIN); sp(hx, hy, SKIN);
+  sp(hx - 1, hy + 1, SKIN_SH); sp(hx, hy + 1, SKIN_SH);
+
+  // 胡子（随摆动参数逐行偏移）
+  for (let i = 0; i < 10; i++) {
+    const y = 15 + i;
+    const o = tl + Math.round(beardSway * i / 9);
+    const l = BEARD_L[i] + o, r = BEARD_R[i] + o;
+    for (let x = l; x <= r; x++) {
+      let c = BEARD;
+      if (x === l) c = BEARD_SH;
+      if ((i === 3 && x === l + 2) || (i === 5 && x === l + 3) || (i === 7 && x === l + 1)) c = BEARD_SH;
+      sp(x, y + bd, c);
+    }
+  }
+
+  // 头与弯尖帽
+  for (let y = 0; y < HEAD_H; y++) {
+    for (let x = 0; x < HEAD_W; x++) {
+      const v = HEAD[y * HEAD_W + x];
+      if (v === EMPTY) continue;
+      if (v === TIP) sp(x + tl + (y >= 2 ? flop : 0), y + bd, ROBE_D);
+      else sp(x + tl, y + bd, v);
+    }
+  }
+  const t = stick / 60;
+  const magicEye = (state === ST_CHARGE && t > 0.5) || (state === ST_CAST && stick < 30);
+  if (magicEye) sp(13 + tl, 12 + bd, CYAN);
+
+  // 宝石
+  const gx = gemLX, gy = gemLY;
+  let gc = CYAN, gN = WHITE, gW = CYAN, gE = BLUE, gS = BLUE, outer = 0;
+  if (state === ST_CHARGE) {
+    const f = (tick >> 2) & 1;
+    gc = f ? WHITE : CYAN;
+    gN = gW = f ? CYAN : MAGENTA;
+    gE = gS = f ? MAGENTA : CYAN;
+    if (t > 0.8) outer = f ? BLUE : MAGENTA;
+  } else if (state === ST_CAST && stick < 24) {
+    gc = gN = gW = WHITE; gE = gS = CYAN;
+    if (stick >= RELEASE_TICK) outer = CYAN;
+  } else if (((tick % 40) | 0) < 4) {
+    gc = WHITE;
+  }
+  if (outer) { sp(gx, gy - 2, outer); sp(gx, gy + 2, outer); sp(gx - 2, gy, outer); sp(gx + 2, gy, outer); }
+  sp(gx, gy, gc); sp(gx, gy - 1, gN); sp(gx - 1, gy, gW); sp(gx + 1, gy, gE); sp(gx, gy + 1, gS);
+
+  // 宝石轮廓光：朝向宝石的边缘像素被点亮（半径随状态变化）
+  let r0 = 0, r1 = 0, r2 = 8;
+  const flick = (tick >> 2) & 1;
+  if (state === ST_CHARGE) {
+    const k = clamp01(t / 1.2);
+    r1 = 3 + 8 * k + flick; r2 = 10 + 8 * k + flick;
+  } else if (state === ST_CAST) {
+    const ft = (stick - RELEASE_TICK) / 60;
+    if (ft < 0) { r1 = 12; r2 = 19; }
+    else { r0 = Math.max(0, 16 - ft * 40); r1 = Math.max(8, 24 - ft * 22); r2 = Math.max(14, 32 - ft * 26); }
+  } else if (state === ST_RECOVER) {
+    const k = clamp01(t / 0.9);
+    r1 = 8 * (1 - k); r2 = 8 + 6 * (1 - k);
+  }
+  const gsx = gx + SOX, gsy = gy + SOY;
+  const R0 = r0 * r0, R1 = r1 * r1, R2 = r2 * r2;
+  for (let y = 0; y < SH; y++) {
+    for (let x = 0; x < SW; x++) {
+      const i = y * SW + x, v = spr[i];
+      if (NORIM[v]) continue;
+      const ddx = gsx - x, ddy = gsy - y, d2 = ddx * ddx + ddy * ddy;
+      if (d2 >= R2) continue;
+      const sx = ddx > 0 ? 1 : ddx < 0 ? -1 : 0, sy = ddy > 0 ? 1 : ddy < 0 ? -1 : 0;
+      if ((sx !== 0 && sprEmpty(x + sx, y)) || (sy !== 0 && sprEmpty(x, y + sy))) {
+        spr[i] = d2 < R0 ? WHITE : d2 < R1 ? CYAN : BLUE;
+      }
+    }
+  }
+
+  // 1 像素深色描边（4 邻接）
+  for (let y = 0; y < SH; y++) {
+    for (let x = 0; x < SW; x++) {
+      const i = y * SW + x;
+      if (spr[i] !== EMPTY) continue;
+      if ((x > 0 && spr[i - 1] < 250) || (x < SW - 1 && spr[i + 1] < 250) ||
+          (y > 0 && spr[i - SW] < 250) || (y < SH - 1 && spr[i + SW] < 250)) spr[i] = OUTL;
+    }
+  }
+}
+
+function compositeWizard() {
+  const ox = WX0 - SOX, oy = WY0 - SOY;
+  for (let y = 0; y < SH; y++) {
+    for (let x = 0; x < SW; x++) {
+      const v = spr[y * SW + x];
+      if (v === EMPTY) continue;
+      pset(ox + x, oy + y, v === OUTL ? VOID : v);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 动画关键帧采样：以 12fps 的节奏采样平滑参数，再量化到像素网格
+// ---------------------------------------------------------------------------
+function samplePose() {
+  const t = stick / 60;
+  bob = 0; beardSway = 0; hem = 0; flop = 0;
+  if (state === ST_IDLE) {
+    setPose(REST);
+    bob = ((stick / 24) | 0) & 1;                              // 两帧上下晃动
+    const lag = ((Math.max(0, stick - 10) / 24) | 0) & 1;      // 胡子与帽尖滞后摆动
+    beardSway = lag; flop = -lag;
+  } else if (state === ST_CHARGE) {
+    lerpPose(REST, RAISE, easeInOutCubic(clamp01(t / 0.45)));
+    if (t >= 1.25) lerpPose(RAISE, ANTIC, easeInOutQuad(clamp01((t - 1.25) / 0.3)));
+    if (t > 0.3) {                                             // 魔力气流吹动衣摆
+      const w = ((stick / 10) | 0) & 1;
+      beardSway = w; hem = w; flop = -w;
+    }
+  } else if (state === ST_CAST) {
+    lerpPose(ANTIC, THRUST, easeOutBack(clamp01(t / 0.12)));
+    if (stick >= RELEASE_TICK) {
+      beardSway = t > 0.4 ? -1 : -2; hem = t > 0.4 ? -1 : -2; flop = -1;
+    }
+  } else {
+    const k = easeInOutCubic(clamp01(t / 0.9));
+    lerpPose(THRUST, REST, k);
+    beardSway = Math.round(-1 + k); hem = Math.round(-1 + k);
+  }
+  quantizePose();
+}
+
+// ---------------------------------------------------------------------------
+// 粒子系统：预分配的结构数组，循环复用
+// ---------------------------------------------------------------------------
+const NP = 200;
+const K_NONE = 0, K_ORBIT = 1, K_SPARK = 2, K_TRAIL = 3, K_MOTE = 4;
+const pk = new Uint8Array(NP);
+const px = new Float32Array(NP), py = new Float32Array(NP);
+const pvx = new Float32Array(NP), pvy = new Float32Array(NP);
+const pa = new Float32Array(NP), pr = new Float32Array(NP);
+const pva = new Float32Array(NP), pvr = new Float32Array(NP);
+const page = new Float32Array(NP), plife = new Float32Array(NP);
+let pcur = 0;
+function palloc() {
+  for (let n = 0; n < NP; n++) {
+    const i = (pcur + n) % NP;
+    if (pk[i] === K_NONE) { pcur = (i + 1) % NP; return i; }
+  }
+  return -1;
+}
+function spawnOrbit() {
+  const i = palloc(); if (i < 0) return;
+  pk[i] = K_ORBIT; page[i] = 0;
+  pa[i] = rnd() * TAU; pr[i] = 9 + rnd() * 7; pva[i] = 4 + rnd() * 3;
+  plife[i] = 0.45 + rnd() * 0.35; pvr[i] = pr[i] / plife[i];
+  px[i] = gemX + Math.cos(pa[i]) * pr[i]; py[i] = gemY + Math.sin(pa[i]) * pr[i];
+}
+function spawnSpark(x, y, ang, spd, life) {
+  const i = palloc(); if (i < 0) return;
+  pk[i] = K_SPARK; page[i] = 0; plife[i] = life;
+  px[i] = x; py[i] = y;
+  pvx[i] = Math.cos(ang) * spd + 35; pvy[i] = Math.sin(ang) * spd * 0.8 - 10;
+}
+function spawnTrail(x, y) {
+  const i = palloc(); if (i < 0) return;
+  pk[i] = K_TRAIL; page[i] = 0; plife[i] = 0.2 + rnd() * 0.25;
+  px[i] = x - rnd() * 3; py[i] = y + (rnd() - 0.5) * 3;
+  pvx[i] = -8 - rnd() * 22; pvy[i] = (rnd() - 0.5) * 22;
+}
+function spawnMote() {
+  const i = palloc(); if (i < 0) return;
+  pk[i] = K_MOTE; page[i] = 0; plife[i] = 1.0 + rnd() * 0.5;
+  px[i] = gemX + (rnd() - 0.5) * 4; py[i] = gemY - 1;
+  pa[i] = rnd() * TAU; pvx[i] = 0; pvy[i] = -7 - rnd() * 4;
+}
+
+const DT = 1 / 60;
+function updateParticles() {
+  for (let i = 0; i < NP; i++) {
+    const k = pk[i];
+    if (k === K_NONE) continue;
+    page[i] += DT;
+    if (page[i] >= plife[i]) { pk[i] = K_NONE; continue; }
+    if (k === K_ORBIT) {
+      pr[i] -= pvr[i] * DT;
+      if (pr[i] <= 0.5) { pk[i] = K_NONE; continue; }
+      pa[i] += pva[i] * DT * (1 + 6 / (pr[i] + 2));
+      px[i] = gemX + Math.cos(pa[i]) * pr[i];
+      py[i] = gemY + Math.sin(pa[i]) * pr[i] * 0.85;
+    } else if (k === K_SPARK) {
+      pvx[i] *= 0.93; pvy[i] = pvy[i] * 0.93 + 40 * DT;
+      px[i] += pvx[i] * DT; py[i] += pvy[i] * DT;
+    } else if (k === K_TRAIL) {
+      pvx[i] *= 0.9; pvy[i] *= 0.9;
+      px[i] += pvx[i] * DT; py[i] += pvy[i] * DT;
+    } else {
+      px[i] += Math.sin(page[i] * 5 + pa[i]) * 0.12; py[i] += pvy[i] * DT;
+    }
+  }
+}
+function drawParticles() {
+  for (let i = 0; i < NP; i++) {
+    const k = pk[i];
+    if (k === K_NONE) continue;
+    let ci = (page[i] / plife[i] * RAMP_N) | 0;
+    if (ci >= RAMP_N) ci = RAMP_N - 1;
+    const tail = ci + 1 < RAMP_N ? RAMP[ci + 1] : RAMP[RAMP_N - 1];
+    if (k === K_SPARK) {
+      if (pvx[i] * pvx[i] + pvy[i] * pvy[i] > 2500) psetR(px[i] - pvx[i] * 0.025, py[i] - pvy[i] * 0.025, tail);
+    } else if (k === K_ORBIT) {
+      psetR(gemX + Math.cos(pa[i] - 0.4) * pr[i], gemY + Math.sin(pa[i] - 0.4) * pr[i] * 0.85, tail);
+    }
+    psetR(px[i], py[i], RAMP[ci]);
+  }
+}
+
+// 飞弹
+let mOn = false, mx = 0, my = 0;
+const MSPD = 190;
+function updateMissile() {
+  if (!mOn) return;
+  mx += MSPD * DT;
+  spawnTrail(mx - 2, my); spawnTrail(mx - 4, my);
+  if (mx > W + 16) mOn = false;
+}
+function drawMissile() {
+  if (!mOn) return;
+  const cx = Math.round(mx), cy = Math.round(my), ph = (tick >> 1) & 1;
+  for (let x = -6; x <= 2; x++) {
+    pset(cx + x, cy, x <= -5 ? BLUE : x <= -3 ? CYAN : x <= 1 ? WHITE : CYAN);
+  }
+  for (let s = -1; s <= 1; s += 2) {
+    pset(cx - 4, cy + s, BLUE); pset(cx - 3, cy + s, CYAN); pset(cx - 2, cy + s, CYAN);
+    pset(cx - 1, cy + s, WHITE); pset(cx, cy + s, WHITE); pset(cx + 1, cy + s, CYAN);
+  }
+  pset(cx - 1, cy + (ph ? -2 : 2), CYAN);
+  pset(cx - 3, cy + (ph ? 2 : -2), BLUE);
+  pset(cx - 7 - ph, cy, MAGENTA);
+}
+
+// 强光爆发：像素圆环 + 十字星芒
+function circle(cx, cy, r, c) {
+  let x = r, y = 0, err = 1 - r;
+  while (x >= y) {
+    pset(cx + x, cy + y, c); pset(cx + y, cy + x, c); pset(cx - y, cy + x, c); pset(cx - x, cy + y, c);
+    pset(cx - x, cy - y, c); pset(cx - y, cy - x, c); pset(cx + y, cy - x, c); pset(cx + x, cy - y, c);
+    y++;
+    if (err < 0) err += 2 * y + 1; else { x--; err += 2 * (y - x) + 1; }
+  }
+}
+function drawFlash() {
+  const f = tick - releaseTick;
+  if (f < 0 || f >= 20) return;
+  const ring = 3 + Math.round(f * 1.3);
+  circle(releaseX, releaseY, ring, f < 4 ? WHITE : f < 9 ? CYAN : f < 14 ? BLUE : MAGIC_D);
+  if (f >= 3 && f < 14) circle(releaseX, releaseY, ring - 3, f < 8 ? BLUE : MAGIC_D);
+  if (f < 7) {
+    const L = f < 2 ? 14 : f < 4 ? 10 : 6;
+    for (let i = 1; i <= L; i++) {
+      const c = i <= (L >> 1) ? WHITE : CYAN;
+      pset(releaseX + i, releaseY, c); pset(releaseX - i, releaseY, c);
+      pset(releaseX, releaseY + i, c); pset(releaseX, releaseY - i, c);
+      if (i <= (L >> 1)) {
+        const d = i <= 2 ? WHITE : CYAN;
+        pset(releaseX + i, releaseY + i, d); pset(releaseX - i, releaseY - i, d);
+        pset(releaseX + i, releaseY - i, d); pset(releaseX - i, releaseY + i, d);
+      }
+    }
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) pset(releaseX + i, releaseY + j, WHITE);
+  }
+}
+let releaseX = 0, releaseY = 0;
+
+function release() {
+  releaseTick = tick;
+  releaseX = gemX; releaseY = gemY;
+  // 绕宝石旋转的火花全部向外炸开
+  for (let i = 0; i < NP; i++) {
+    if (pk[i] !== K_ORBIT) continue;
+    const spd = 60 + rnd() * 70;
+    pk[i] = K_SPARK; page[i] = 0; plife[i] = 0.3 + rnd() * 0.3;
+    pvx[i] = Math.cos(pa[i]) * spd; pvy[i] = Math.sin(pa[i]) * spd;
+  }
+  for (let n = 0; n < 60; n++) spawnSpark(gemX, gemY, rnd() * TAU, 45 + rnd() * 115, 0.35 + rnd() * 0.55);
+  mOn = true; mx = gemX + 2; my = gemY;
+  shakeTicks = 15;
+}
+
+// 屏幕震动
+let shakeTicks = 0;
+function updateShake() {
+  if (shakeTicks > 0) {
+    shakeTicks--;
+    if ((shakeTicks & 1) === 0) {
+      const amp = shakeTicks > 8 ? 2 : 1;
+      camX = Math.round((rnd() * 2 - 1) * amp);
+      camY = Math.round((rnd() * 2 - 1) * amp);
+    }
+    if (shakeTicks === 0) { camX = 0; camY = 0; }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 固定步长更新
+// ---------------------------------------------------------------------------
+function update() {
+  tick++; stick++;
+  if (stick >= ST_TICKS[state]) { state = (state + 1) & 3; stick = 0; }
+  if (stick % 5 === 0) samplePose();
+  const t = stick / 60;
+
+  if (state === ST_CHARGE && t > 0.2 && t < 1.55) {
+    const rate = 0.3 + 0.6 * (t - 0.2) / 1.35;
+    if (rnd() < rate) spawnOrbit();
+    if (t > 1.25 && rnd() < rate) spawnOrbit();
+  } else if (state === ST_CAST && stick === RELEASE_TICK) {
+    release();
+  } else if ((state === ST_IDLE || state === ST_RECOVER) && stick % 30 === 12) {
+    spawnMote();
+  }
+
+  updateParticles();
+  updateMissile();
+  updateShake();
+}
+
+// ---------------------------------------------------------------------------
+// 渲染
+// ---------------------------------------------------------------------------
+function drawStars() {
+  const frame = (tick / 5) | 0;
+  for (let i = 0; i < NSTARS; i++) {
+    const x = starX[i], y = starY[i];
+    let lvl = ((Math.sin(frame * starSp[i] + starPh[i]) + 1) * 1.5) | 0;
+    if (lvl > 2) lvl = 2;
+    pset(x, y, STAR_COLS[lvl]);
+    if (starBig[i] && lvl >= 1) {
+      const c = lvl === 2 ? BEARD_SH : MAGIC_D;
+      pset(x - 1, y, c); pset(x + 1, y, c); pset(x, y - 1, c); pset(x, y + 1, c);
+    }
+  }
+}
+function drawGroundGlow() {
+  let R = 0, inner = 0, c = BLUE;
+  const t = stick / 60;
+  if (state === ST_CHARGE) { R = Math.round(4 + 10 * clamp01(t / 1.4)); }
+  else if (state === ST_CAST) {
+    const f = stick - RELEASE_TICK;
+    if (f < 0) R = 14;
+    else { R = Math.max(6, 26 - f); inner = Math.max(0, 12 - f); c = f < 4 ? CYAN : BLUE; }
+  }
+  if (R <= 0) return;
+  const ph = (tick >> 3) & 1;
+  const x0 = Math.max(gemX - R, WX0 + 14);
+  for (let x = x0; x <= gemX + R; x++) {
+    const d = Math.abs(x - gemX);
+    if (d < inner) pset(x, GROUND_Y, c === CYAN ? WHITE : CYAN);
+    else if (((x + ph) & 1) === 0) pset(x, GROUND_Y, c);
+  }
+}
+function drawGemHalo() {
+  let r = 0, c = BLUE;
+  const t = stick / 60;
+  if (state === ST_CHARGE && t > 0.3) r = 3;
+  else if (state === ST_CAST && stick < 24) { r = 4; c = CYAN; }
+  if (!r) return;
+  const ph = (tick >> 2) & 1;
+  for (let dy = -r; dy <= r; dy++) {
+    const ax = r - Math.abs(dy);
+    for (let s = -1; s <= 1; s += 2) {
+      const dx = ax * s;
+      if (((dx + dy + ph) & 1) === 0) pset(gemX + dx, gemY + dy, c);
+      if (ax === 0) break;
+    }
+  }
+}
+
+function render() {
+  let i = 0;
+  for (let sy = 0; sy < H; sy++) {
+    const row = (sy - camY + BGO) * BGW + BGO - camX;
+    for (let sx = 0; sx < W; sx++) fb[i++] = BG[row + sx];
+  }
+  drawStars();
+  drawGroundGlow();
+  buildWizard();
+  compositeWizard();
+  drawGemHalo();
+  drawFlash();
+  drawParticles();
+  drawMissile();
+
+  const f = tick - releaseTick;
+  const remap = (f >= 0 && f < 3) ? REMAP2 : (f >= 3 && f < 6) ? BRIGHT : REMAP0;
+  for (let j = 0; j < W * H; j++) out32[j] = PAL32[remap[fb[j]]];
+  octx.putImageData(img, 0, 0);
+  sctx.drawImage(off, 0, 0, W, H, offX, offY, W * scale, H * scale);
+}
+
+// ---------------------------------------------------------------------------
+// 主循环：60Hz 固定步长更新 + requestAnimationFrame 渲染
+// ---------------------------------------------------------------------------
+const STEP = 1000 / 60;
+let last = -1, acc = 0;
+function frame(now) {
+  if (last < 0) last = now;
+  let d = now - last;
+  last = now;
+  if (d > 250) d = 250;
+  acc += d;
+  let n = 0;
+  while (acc >= STEP - 0.5 && n < 10) { update(); acc -= STEP; n++; }
+  if (n === 10) acc = 0;
+  render();
+  requestAnimationFrame(frame);
+}
+samplePose();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
